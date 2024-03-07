@@ -1,0 +1,127 @@
+#! /usr/local/bin/python3
+" Subversion pre-commit hook. "
+import sys
+import logging
+import os.path
+import time
+import re
+import subprocess
+from lxml import etree as ET
+from io import StringIO
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)  # Log等级总开关
+# 第二步，创建一个handler，用于写入日志文件
+rq = time.strftime(u'%Y%m%d%H%M', time.localtime(time.time()))
+log_path = u'/Users/qqxy/work/svn/svn-repository/hooks'
+log_name = log_path + rq + u'.log'
+logfile = log_name
+fh = logging.FileHandler(logfile, mode=u'w')
+fh.setLevel(logging.DEBUG)  # 输出到file的log等级的开关
+# 第三步，定义handler的输出格式
+formatter = logging.Formatter(u"%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s")
+fh.setFormatter(formatter)
+# 第四步，将logger添加到handler里面
+logger.addHandler(fh)
+
+def command_output(cmd):
+  " Capture a command's standard output. "
+  #logger.info(f'cmd {cmd}')
+  return subprocess.Popen(
+         cmd.split(), stdout=subprocess.PIPE).communicate()[0]
+
+def file_contents(filename, look_cmd):
+  " Return a file's contents for this transaction. "
+  #logger.info(f'look_cmd {look_cmd}')
+  return command_output(
+     "%s %s" % (look_cmd % "cat", filename))
+
+def files_changed(look_cmd):
+  """ List the files added or updated by this transaction.
+
+  "svnlook changed" gives output like:
+  U   trunk/file1.xml
+  A   trunk/file2.xml
+  """
+  def filename(line):
+      name = line[4:]
+      #logger.info(f'filename: {name}')
+      return name
+  def added_or_updated(line):
+      return line and line[0] in ("A", "U")
+  return [
+      filename(line)
+      for line in command_output(look_cmd % "changed").decode("UTF-8").split("\n")
+      if added_or_updated(line)]
+
+
+def validate_xml(look_cmd, file_path):
+    # 检查文件扩展名是否为.xml
+    if not file_path.endswith('.xml'):
+        return True
+    try:
+        # 检查文件编码格式
+        contents = file_contents(file_path, look_cmd).decode("UTF-8")
+        #logger.info(f'validate_xml contents: {contents}')
+        # 尝试打开文件并解析XML
+        #parser = ET.XMLParser()
+        #tree = ET.parse(contents, parser)
+        tree = ET.parse(StringIO(contents))
+        #root = ET.fromstring(contents)
+        return True
+    except ET.ParseError as e:
+        # 如果解析失败，返回错误信息
+        err = "Error: The XML file %s has a format error: %s" % (file_path, e)
+        sys.stderr.write(err)
+        #logger.info(f'validate_xml err: {err}')
+        return False
+
+def check_files(look_cmd):
+  errors = 0
+  for ff in files_changed(look_cmd):
+        result = validate_xml(look_cmd, ff)
+        #logger.info(f'check_files result: {result}')
+        if not result:
+            errors += 1
+  return errors
+
+def check_svnlook_log(look_cmd):
+    log_content = command_output(look_cmd)
+    #logger.info(f'log_content {log_content}')
+    #log_temp = log_content.strip()
+    #logger.info(f'log_temp {log_temp}')
+    if len(log_content.strip()) < 3:
+         sys.stderr.write("提交时log内容必须超过2个字符")
+         return 1
+    return 0
+
+def main():
+  usage = """usage: %prog REPOS TXN
+  
+  Run pre-commit options on a repository transaction."""
+  from optparse import OptionParser
+  parser = OptionParser(usage=usage)
+  parser.add_option("-r", "--revision",
+                    help="Test mode. TXN actually refers to a revision.",
+                    action="store_true", default=False)
+  errors = 0
+  try:
+      (opts, (repos, txn_or_rvn)) = parser.parse_args()
+      look_opt = ("--transaction", "--revision")[opts.revision]
+      look_cmd = "/usr/local/bin/svnlook %s %s %s %s" % (
+          "%s", repos, look_opt, txn_or_rvn)
+      # 检查提交log
+      log_cmd = "/usr/local/bin/svnlook log -t %s %s" % (txn_or_rvn, repos)
+      errors = check_svnlook_log(log_cmd)
+      if errors > 0:
+         return errors
+      # 检查xml文件格式
+      errors += check_files(look_cmd)
+  except Exception as e:
+      parser.print_help()
+      sys.stderr.write(f"main err {e}")
+      errors += 1
+  return errors
+
+if __name__ == "__main__":
+  sys.exit(main())
